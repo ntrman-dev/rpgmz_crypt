@@ -1,5 +1,9 @@
 # RPG Maker MZ 数据文件加解密工具
 
+御爱论坛原帖:  [RPG Maker MZ 数据文件加解密工具](https://www.ai2.moe/topic/46675-rpg-maker-mz-%E5%8A%A0%E5%AF%86data%E6%95%B0%E6%8D%AE%E7%9A%84%E8%A7%A3%E5%AF%86%E5%B7%A5%E5%85%B7%E5%AE%9E%E7%8E%B0/)
+
+有问题论坛私信我，这个github账号不咋看
+
 ## 适用范围
 
 所有 **RPG Maker MZ** 引擎（v1.9.x）部署的游戏。加密算法由引擎 `rmmz_managers.js` 的混淆代码实现，常量硬编码在引擎中，不随游戏变化。
