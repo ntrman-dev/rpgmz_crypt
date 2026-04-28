@@ -1,0 +1,82 @@
+name: release-rust
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - rpgmz_crypt_rs/**
+      - .github/workflows/release-rust.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-rust-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: rpgdata_crypt-linux-x86_64
+            binary_path: rpgmz_crypt_rs/target/release/rpgdata_crypt
+            release_name: rpgdata_crypt-linux-x86_64
+          - os: windows-latest
+            artifact_name: rpgdata_crypt-windows-x86_64.exe
+            binary_path: rpgmz_crypt_rs/target/release/rpgdata_crypt.exe
+            release_name: rpgdata_crypt-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --manifest-path rpgmz_crypt_rs/Cargo.toml
+
+      - name: Stage Linux artifact
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p release
+          cp "${{ matrix.binary_path }}" "release/${{ matrix.release_name }}"
+
+      - name: Stage Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item "${{ matrix.binary_path }}" "release/${{ matrix.release_name }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/${{ matrix.release_name }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Publish rolling release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: rust-main
+          name: Rust latest build
+          prerelease: true
+          allowUpdates: true
+          replacesArtifacts: true
+          artifacts: release-artifacts/**/*
