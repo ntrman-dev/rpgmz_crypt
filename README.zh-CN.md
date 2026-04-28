@@ -4,6 +4,10 @@
 
 本工具适用于这样一类 RPG Maker 游戏：`data/*.json` 不是明文，而是被包装成 `{"uid","bid","data"}`，并在管理器脚本加载时解密。
 
+御爱论坛帖子： [RPG Maker MZ / MV data JSON 数据加解密工具](https://www.ai2.moe/topic/46675-rpg-maker-mzmv-%E5%8A%A0%E5%AF%86data%E6%95%B0%E6%8D%AE%E7%9A%84%E8%A7%A3%E5%AF%86%E5%B7%A5%E5%85%B7%E5%AE%9E%E7%8E%B0/)
+
+有问题论坛私信，这个github账号不咋用
+
 ## 支持的游戏家族
 
 目前支持并已验证的家族：
