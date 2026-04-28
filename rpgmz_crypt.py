@@ -32,6 +32,12 @@ from dataclasses import dataclass
 
 # ── Encryption parameters (version-dependent) ────────────────────────────────
 
+MZ_MANAGERS_JS = "js/rmmz_managers.js"
+MZ_MANAGERS_JS_BAK = "js/rmmz_managers.js.bak"
+MV_MANAGERS_JS = "js/rpg_managers.js"
+MV_MANAGERS_JS_BAK = "js/rpg_managers.js.bak"
+
+
 @dataclass
 class CryptoParams:
     """Encryption constants extracted from rmmz_managers.js.
@@ -56,17 +62,19 @@ class CryptoParams:
                    xor_k=146, add_k=46, lowercase_filename=True)
 
 
-def extract_params_from_js(js_path: str) -> CryptoParams:
-    """Parse encryption constants from rmmz_managers.js.
+@dataclass
+class GameContext:
+    root: str
+    engine: str
+    manager_js: str
+    manager_js_backup: str
 
-    Instead of searching each constant independently, parse the
-    decryption loop as one unit so we don't accidentally mix values from
-    unrelated obfuscated expressions elsewhere in the file.
-    """
+
+def _extract_params_from_js(js_path: str) -> CryptoParams:
+    """Parse encryption constants from an engine manager JS file."""
     with open(js_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # ── window._K = (Math.sqrt(43681)|0) ──
     m = re.search(r"window\._K\s*=\s*\(Math\.sqrt\((\d+)\)\|0\)", content)
     if not m:
         raise ValueError(f"Cannot find window._K assignment in {js_path}")
@@ -75,7 +83,6 @@ def extract_params_from_js(js_path: str) -> CryptoParams:
         raise ValueError(f"Math.sqrt({m.group(1)}) is not a perfect square")
     k_value = int(k_value)
 
-    # Parse filename normalisation from the same onXhrLoad block.
     m = re.search(
         r"var\s+n\s*=\s*src\.split\(/.*?/\)\.pop\(\)\.replace\('\.json',\s*''\)(\.toLowerCase\(\))?",
         content,
@@ -84,7 +91,6 @@ def extract_params_from_js(js_path: str) -> CryptoParams:
         raise ValueError(f"Cannot find filename normalisation pattern in {js_path}")
     lowercase_filename = bool(m.group(1))
 
-    # Parse the full decryption loop so all constants come from the same block.
     m = re.search(
         r"var\s+_c\s*=\s*\(fk\|(\d+)\)&~\(fk&\1\),\s*"
         r"_m\s*=\s*\(i%128\),\s*"
@@ -95,21 +101,91 @@ def extract_params_from_js(js_path: str) -> CryptoParams:
     if not m:
         raise ValueError(f"Cannot find decryption loop pattern in {js_path}")
 
-    xor_c = int(m.group(1))
-    left_shift_p = int(m.group(2))
-    right_shift_p = int(m.group(3))
-    xor_k = int(m.group(4))
-    add_k = int(m.group(5))
-
     return CryptoParams(
         k_value=k_value,
-        xor_c=xor_c,
-        left_shift_p=left_shift_p,
-        right_shift_p=right_shift_p,
-        xor_k=xor_k,
-        add_k=add_k,
+        xor_c=int(m.group(1)),
+        left_shift_p=int(m.group(2)),
+        right_shift_p=int(m.group(3)),
+        xor_k=int(m.group(4)),
+        add_k=int(m.group(5)),
         lowercase_filename=lowercase_filename,
     )
+
+
+def extract_mz_params_from_js(js_path: str) -> CryptoParams:
+    return _extract_params_from_js(js_path)
+
+
+def extract_mv_params_from_js(js_path: str) -> CryptoParams:
+    return _extract_params_from_js(js_path)
+
+
+def extract_params_from_js(js_path: str) -> CryptoParams:
+    """Backward-compatible parameter extraction based on JS filename."""
+    filename = os.path.basename(js_path).lower()
+    if filename == os.path.basename(MV_MANAGERS_JS):
+        return extract_mv_params_from_js(js_path)
+    return extract_mz_params_from_js(js_path)
+
+
+def detect_game_context(game_dir: str) -> GameContext:
+    root = Path(game_dir).resolve()
+    data_dir = root / "data"
+    if not data_dir.is_dir():
+        raise ValueError(f"{root} is not a game root: missing data/")
+
+    mz_js = root / MZ_MANAGERS_JS
+    if mz_js.is_file():
+        return GameContext(
+            root=str(root),
+            engine="mz",
+            manager_js=str(mz_js),
+            manager_js_backup=str(root / MZ_MANAGERS_JS_BAK),
+        )
+
+    mv_js = root / MV_MANAGERS_JS
+    if mv_js.is_file():
+        return GameContext(
+            root=str(root),
+            engine="mv_custom",
+            manager_js=str(mv_js),
+            manager_js_backup=str(root / MV_MANAGERS_JS_BAK),
+        )
+
+    raise ValueError(
+        f"{root} is not a supported game root: expected {MZ_MANAGERS_JS} or {MV_MANAGERS_JS}"
+    )
+
+
+def _path_search_start(path_str: str) -> Path:
+    path = Path(path_str).resolve()
+    if path.is_file() or (not path.exists() and path.suffix):
+        return path.parent
+    return path
+
+
+def auto_detect_game_context(*paths: str) -> GameContext:
+    for path_str in paths:
+        if not path_str:
+            continue
+        current = _path_search_start(path_str)
+        for candidate in (current, *current.parents):
+            try:
+                return detect_game_context(str(candidate))
+            except ValueError:
+                continue
+    raise ValueError(
+        "Could not auto-detect an RPG Maker game root from the provided paths. "
+        "Pass --game /path/to/game."
+    )
+
+
+def extract_params_for_context(ctx: GameContext) -> CryptoParams:
+    if ctx.engine == "mz":
+        return extract_mz_params_from_js(ctx.manager_js)
+    if ctx.engine == "mv_custom":
+        return extract_mv_params_from_js(ctx.manager_js)
+    raise ValueError(f"Unsupported engine: {ctx.engine}")
 
 # ── JS 32-bit integer emulation ────────────────────────────────────────────
 
@@ -300,123 +376,102 @@ def process_directory(
 
 # ── JS engine patching ─────────────────────────────────────────────────────
 
-# The rmmz_managers.js file to patch
-MANAGERS_JS = "js/rmmz_managers.js"
-MANAGERS_JS_BAK = "js/rmmz_managers.js.bak"
 DATA_BAK = "data.encrypted"
-
-# Two known engine variants for onXhrLoad.  The obfuscation tool produces
-# slightly different code structures across engine builds.
-#
-# Variant A (v1.9.x): no early-return guard — decryption always runs.
-#   var b = Buffer.from(c.data, 'base64');
-#   ... decrypt ...
-#   window[name] = JSON.parse(b.toString('utf8')...);
-#   _t.onLoad(window[name]);
-#   → Patch adds if(c.bid){...}else{...} wrapper.
-#
-# Variant B (v1.3.x): has early-return guard using !c.data.
-#   if(!c.data) { window[name] = c; return _t.onLoad(window[name]); }
-#   var b = Buffer.from(...), n = ..., t = 0;
-#   ... decrypt ...
-#   window[name] = JSON.parse(b.toString('utf8')...);
-#   _t.onLoad(window[name]);
-#   → Patch: flip !c.data → !c.bid (the early-return already handles plain).
-#
-# We try variant A first (more common); fall back to variant B.
-
-PATCH_SET_A = [
-    (
-        "var b = Buffer.from(c.data, 'base64');",
-        "if(c.bid){var b = Buffer.from(c.data, 'base64');",
-    ),
-    (
-        "window[name] = JSON.parse(b.toString('utf8').replace(/^\\uFEFF/, ''));   _t.onLoad(window[name]);",
-        "window[name] = JSON.parse(b.toString('utf8').replace(/^\\uFEFF/, ''));}else{window[name] = c;}   _t.onLoad(window[name]);",
-    ),
-]
-
-PATCH_SET_B = [
-    (
-        "if(!c.data) { window[name] = c; return _t.onLoad(window[name]); }",
-        "if(!c.bid) { window[name] = c; return _t.onLoad(window[name]); }",
-    ),
+PARAM_SOURCE_JS_FILES = [
+    MZ_MANAGERS_JS,
+    MV_MANAGERS_JS,
 ]
 
 
-def patch_managers_js(game_dir: str) -> bool:
-    """
-    Patch DataManager.onXhrLoad to support both encrypted and plain JSON files.
+def find_param_source_js(game_dir: str) -> str | None:
+    """Return the first engine JS file that contains data decryption params."""
+    for rel_path in PARAM_SOURCE_JS_FILES:
+        js_path = os.path.join(game_dir, rel_path)
+        if os.path.isfile(js_path):
+            return js_path
+    return None
 
-    Returns True if patched, False if already patched.
-    """
-    js_path = os.path.join(game_dir, MANAGERS_JS)
 
-    if not os.path.isfile(js_path):
-        print(f"ERROR: {js_path} not found — is this an RPG Maker MZ game?", file=sys.stderr)
-        sys.exit(1)
-
+def _patch_js_file(js_path: str, replacements: list[tuple[str, str]], already_patched_markers: list[str]) -> bool:
     with open(js_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Check if already patched (either variant)
-    if "if(c.bid)" in content:
+    if any(marker in content for marker in already_patched_markers):
         print("  JS already patched (plain JSON support detected).")
         return False
 
-    # Try variant A patterns first
-    if all(old in content for old, _new in PATCH_SET_A):
-        for old, new in PATCH_SET_A:
-            content = content.replace(old, new)
-    elif all(old in content for old, _new in PATCH_SET_B):
-        for old, new in PATCH_SET_B:
-            content = content.replace(old, new)
-    else:
-        print(f"  ERROR: unrecognized engine pattern in {MANAGERS_JS}", file=sys.stderr)
-        print(f"         This game may use an unsupported engine version.", file=sys.stderr)
-        sys.exit(1)
+    if not all(old in content for old, _new in replacements):
+        raise ValueError(f"unrecognized engine pattern in {js_path}")
 
-    # Write patched file
+    for old, new in replacements:
+        content = content.replace(old, new)
+
     with open(js_path, "w", encoding="utf-8") as f:
         f.write(content)
 
     return True
 
 
+def patch_mz_managers_js(js_path: str) -> bool:
+    """Patch RPG Maker MZ DataManager loading to accept plain JSON."""
+    replacements = [
+        (
+            "var b = Buffer.from(c.data, 'base64');",
+            "if(c.bid){var b = Buffer.from(c.data, 'base64');",
+        ),
+        (
+            "window[name] = JSON.parse(b.toString('utf8').replace(/^﻿/, ''));",
+            "window[name] = JSON.parse(b.toString('utf8').replace(/^﻿/, ''));}else{window[name] = c;}",
+        ),
+    ]
+    return _patch_js_file(js_path, replacements, already_patched_markers=["if(c.bid){var b = Buffer.from(c.data, 'base64');"])
+
+
+def patch_mv_managers_js(js_path: str) -> bool:
+    """Patch RPG Maker MV custom DataManager loading to accept plain JSON."""
+    replacements = [
+        (
+            "var c=JSON.parse(xhr.responseText);var b=Buffer.from(c.data,'base64');",
+            "var c=JSON.parse(xhr.responseText);if(c.bid){var b=Buffer.from(c.data,'base64');",
+        ),
+        (
+            "window[name]=JSON.parse(b.toString('utf8').replace(/^﻿/, ''));",
+            "window[name]=JSON.parse(b.toString('utf8').replace(/^﻿/, ''));}else{window[name]=c;}",
+        ),
+    ]
+    return _patch_js_file(js_path, replacements, already_patched_markers=["if(c.bid){var b=Buffer.from(c.data,'base64');"])
+
+
+def patch_managers_js(game_dir: str) -> bool:
+    """Patch the detected engine JS file to support plain JSON data files."""
+    ctx = detect_game_context(game_dir)
+    if ctx.engine == "mz":
+        return patch_mz_managers_js(ctx.manager_js)
+    if ctx.engine == "mv_custom":
+        return patch_mv_managers_js(ctx.manager_js)
+    raise ValueError(f"Unsupported engine: {ctx.engine}")
+
+
 # ── High-level commands ────────────────────────────────────────────────────
 
 def cmd_restore(game_dir: str) -> None:
-    """
-    One-click restore: decrypt all data files in place + patch JS engine.
-
-    Creates backups (data.encrypted/, js/rmmz_managers.js.bak) so the
-    operation can be undone with `revert`.
-    """
-    game = Path(game_dir)
+    """One-click restore: decrypt all data files in place and patch the engine."""
+    ctx = detect_game_context(game_dir)
+    game = Path(ctx.root)
     data_dir = game / "data"
     data_bak = game / DATA_BAK
-    js_file = game / MANAGERS_JS
-    js_bak = game / MANAGERS_JS_BAK
+    js_file = Path(ctx.manager_js)
+    js_bak = Path(ctx.manager_js_backup)
 
-    # Validate
-    if not data_dir.is_dir():
-        print(f"ERROR: {data_dir} not found — is this an RPG Maker MZ game?", file=sys.stderr)
-        sys.exit(1)
-    if not js_file.is_file():
-        print(f"ERROR: {js_file} not found — is this an RPG Maker MZ game?", file=sys.stderr)
-        sys.exit(1)
+    params = extract_params_for_context(ctx)
 
-    # Extract encryption parameters from the engine BEFORE moving data
-    params = extract_params_from_js(str(js_file))
-
-    # Check for existing backups (don't overwrite)
     if data_bak.exists():
         print(f"ERROR: backup already exists at {data_bak}/", file=sys.stderr)
         print("       Run 'revert' first if you want to undo a previous restore.", file=sys.stderr)
         sys.exit(1)
 
     print("=" * 60)
-    print("RPG Maker MZ — One-Click Restore")
+    print(f"RPG Maker {ctx.engine} — One-Click Restore")
     print("=" * 60)
     print(f"Game directory: {game.resolve()}")
     print(f"Detected params: _K={params.k_value}, xor_c={params.xor_c}, "
@@ -425,25 +480,22 @@ def cmd_restore(game_dir: str) -> None:
           f"lowercase_filename={params.lowercase_filename}")
     print()
 
-    # Step 1: Backup data directory
     print("[1/3] Backing up encrypted data/ ...")
     shutil.move(str(data_dir), str(data_bak))
     print(f"  → {data_bak.name}/ ({len(list(data_bak.glob('*.json')))} files)")
 
-    # Step 2: Decrypt all data files in place
     print("[2/3] Decrypting data files ...")
     os.makedirs(str(data_dir))
     processed = process_directory(str(data_bak), str(data_dir), "decrypt", params)
     print(f"  → {len(processed)} files decrypted")
 
-    # Step 3: Backup and patch JS
     print("[3/3] Patching JS engine ...")
     shutil.copy2(str(js_file), str(js_bak))
     print(f"  → backup: {js_bak.name}")
 
-    patched = patch_managers_js(game_dir)
+    patched = patch_managers_js(ctx.root)
     if patched:
-        print("  → rmmz_managers.js patched: plain JSON support enabled")
+        print(f"  → {js_file.name} patched: plain JSON support enabled")
 
     print()
     print("Done! The game now runs with decrypted (editable) data files.")
@@ -455,17 +507,18 @@ def cmd_restore(game_dir: str) -> None:
 
 def cmd_revert(game_dir: str) -> None:
     """Undo a previous restore operation."""
-    game = Path(game_dir)
+    ctx = detect_game_context(game_dir)
+    game = Path(ctx.root)
     data_dir = game / "data"
     data_bak = game / DATA_BAK
-    js_file = game / MANAGERS_JS
-    js_bak = game / MANAGERS_JS_BAK
+    js_file = Path(ctx.manager_js)
+    js_bak = Path(ctx.manager_js_backup)
 
     if not data_bak.is_dir() and not js_bak.is_file():
         print("ERROR: no backups found. Nothing to revert.", file=sys.stderr)
         sys.exit(1)
 
-    print("Reverting restore...")
+    print(f"Reverting restore for {ctx.engine}...")
 
     if data_bak.is_dir():
         if data_dir.exists():
@@ -476,31 +529,27 @@ def cmd_revert(game_dir: str) -> None:
     if js_bak.is_file():
         shutil.copy2(str(js_bak), str(js_file))
         os.remove(str(js_bak))
-        print(f"  → {MANAGERS_JS} restored")
+        print(f"  → {js_file.name} restored")
 
     print("Revert complete. Game is back to its original (encrypted) state.")
 
 
 def cmd_patch_js(game_dir: str) -> None:
-    """Patch only the JS engine, without touching data files."""
-    game = Path(game_dir)
-    js_file = game / MANAGERS_JS
-    js_bak = game / MANAGERS_JS_BAK
-
-    if not js_file.is_file():
-        print(f"ERROR: {js_file} not found.", file=sys.stderr)
-        sys.exit(1)
+    """Patch only the engine JS, without touching data files."""
+    ctx = detect_game_context(game_dir)
+    js_file = Path(ctx.manager_js)
+    js_bak = Path(ctx.manager_js_backup)
 
     if js_bak.exists():
         print(f"Note: backup already exists at {js_bak} (not overwriting)")
+    else:
+        shutil.copy2(str(js_file), str(js_bak))
+        print(f"  → backup: {js_bak.name}")
 
-    print("Patching JS engine...")
-    shutil.copy2(str(js_file), str(js_bak))
-    print(f"  → backup: {js_bak.name}")
-
-    patched = patch_managers_js(game_dir)
+    print(f"Patching JS engine for {ctx.engine}...")
+    patched = patch_managers_js(ctx.root)
     if patched:
-        print("  → rmmz_managers.js patched successfully")
+        print(f"  → {js_file.name} patched successfully")
     print()
     print("The engine now accepts both encrypted and plain JSON data files.")
 
@@ -527,7 +576,7 @@ def main():
     )
     dec.add_argument(
         "--game", dest="game_dir", default=None,
-        help="Game root directory for auto-detecting encryption params (default: use v1.9.x)",
+        help="Game root directory for extracting encryption params (default: auto-detect from paths)",
     )
 
     # ── encrypt ──
@@ -540,7 +589,7 @@ def main():
     enc.add_argument("output_dir", help="Directory to write encrypted .json files")
     enc.add_argument(
         "--game", dest="game_dir", default=None,
-        help="Game root directory for auto-detecting encryption params (default: use v1.9.x)",
+        help="Game root directory for extracting encryption params (default: auto-detect from paths)",
     )
 
     # ── decrypt-file ──
@@ -557,7 +606,7 @@ def main():
     )
     dec_f.add_argument(
         "--game", dest="game_dir", default=None,
-        help="Game root directory for auto-detecting encryption params (default: use v1.9.x)",
+        help="Game root directory for extracting encryption params (default: auto-detect from paths)",
     )
 
     # ── encrypt-file ──
@@ -570,7 +619,7 @@ def main():
     enc_f.add_argument("output", help="Output path for encrypted .json")
     enc_f.add_argument(
         "--game", dest="game_dir", default=None,
-        help="Game root directory for auto-detecting encryption params (default: use v1.9.x)",
+        help="Game root directory for extracting encryption params (default: auto-detect from paths)",
     )
 
     # ── restore ──
@@ -617,48 +666,70 @@ def main():
 
     args = parser.parse_args()
 
-    # Resolve encryption params: --game flag > auto-detect via game_dir arg > v1.9.x default
-    def _resolve_params(game_dir: str | None) -> CryptoParams:
+    def _print_context_params(ctx: GameContext, params: CryptoParams) -> None:
+        print(
+            f"Using {ctx.engine} params from {ctx.manager_js}: "
+            f"_K={params.k_value}, xor_c={params.xor_c}, "
+            f"left_shift_p={params.left_shift_p}, right_shift_p={params.right_shift_p}, "
+            f"xor_k={params.xor_k}, add_k={params.add_k}, "
+            f"lowercase_filename={params.lowercase_filename}"
+        )
+
+    def _resolve_conversion_context(game_dir: str | None, *paths: str) -> GameContext:
         if game_dir:
-            js = os.path.join(game_dir, MANAGERS_JS)
-            if os.path.isfile(js):
-                p = extract_params_from_js(js)
-                print(f"Using params from {js}: _K={p.k_value}, xor_c={p.xor_c}, "
-                      f"left_shift_p={p.left_shift_p}, right_shift_p={p.right_shift_p}, "
-                      f"xor_k={p.xor_k}, add_k={p.add_k}, "
-                      f"lowercase_filename={p.lowercase_filename}")
-                return p
-            print(f"WARNING: {js} not found, using v1.9.x defaults", file=sys.stderr)
-        return CryptoParams.default()
+            return detect_game_context(game_dir)
+        return auto_detect_game_context(*paths)
 
-    if args.command in ("decrypt", "encrypt"):
-        params = _resolve_params(getattr(args, "game_dir", None))
-        pretty = getattr(args, "pretty", False)
-        processed = process_directory(args.input_dir, args.output_dir,
-                                      args.command, params, pretty=pretty)
-        print(f"{args.command.capitalize()}ed {len(processed)} files:")
-        for name in processed:
-            print(f"  {name}")
+    try:
+        if args.command in ("decrypt", "encrypt"):
+            ctx = _resolve_conversion_context(
+                getattr(args, "game_dir", None),
+                args.input_dir,
+                args.output_dir,
+            )
+            params = extract_params_for_context(ctx)
+            _print_context_params(ctx, params)
+            pretty = getattr(args, "pretty", False)
+            processed = process_directory(args.input_dir, args.output_dir,
+                                          args.command, params, pretty=pretty)
+            print(f"{args.command.capitalize()}ed {len(processed)} files:")
+            for name in processed:
+                print(f"  {name}")
 
-    elif args.command == "decrypt-file":
-        params = _resolve_params(getattr(args, "game_dir", None))
-        pretty = getattr(args, "pretty", False)
-        decrypt_file(args.input, args.output, params, pretty=pretty)
-        print(f"Decrypted: {args.input} → {args.output}")
+        elif args.command == "decrypt-file":
+            ctx = _resolve_conversion_context(
+                getattr(args, "game_dir", None),
+                args.input,
+                args.output,
+            )
+            params = extract_params_for_context(ctx)
+            _print_context_params(ctx, params)
+            pretty = getattr(args, "pretty", False)
+            decrypt_file(args.input, args.output, params, pretty=pretty)
+            print(f"Decrypted: {args.input} → {args.output}")
 
-    elif args.command == "encrypt-file":
-        params = _resolve_params(getattr(args, "game_dir", None))
-        encrypt_file(args.input, args.output, params)
-        print(f"Encrypted: {args.input} → {args.output}")
+        elif args.command == "encrypt-file":
+            ctx = _resolve_conversion_context(
+                getattr(args, "game_dir", None),
+                args.input,
+                args.output,
+            )
+            params = extract_params_for_context(ctx)
+            _print_context_params(ctx, params)
+            encrypt_file(args.input, args.output, params)
+            print(f"Encrypted: {args.input} → {args.output}")
 
-    elif args.command == "restore":
-        cmd_restore(args.game_dir)
+        elif args.command == "restore":
+            cmd_restore(args.game_dir)
 
-    elif args.command == "revert":
-        cmd_revert(args.game_dir)
+        elif args.command == "revert":
+            cmd_revert(args.game_dir)
 
-    elif args.command == "patch-js":
-        cmd_patch_js(args.game_dir)
+        elif args.command == "patch-js":
+            cmd_patch_js(args.game_dir)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

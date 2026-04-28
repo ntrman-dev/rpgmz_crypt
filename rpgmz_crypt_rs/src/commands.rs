@@ -1,14 +1,13 @@
 // ── File operations & high-level commands ──────────────────────────────
 
-use crate::crypto;
-use anyhow::{Context, Result};
+use crate::crypto::{self, CryptoParams};
+use crate::detect::{auto_detect_game_context, detect_game_context, EngineKind, GameContext};
+use crate::{mv, mz};
+use anyhow::{bail, Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;
-// (no io imports needed)
 use std::path::{Path, PathBuf};
-
-// ── JSON wrapper for encrypted files ───────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EncryptedWrapper {
@@ -17,34 +16,44 @@ struct EncryptedWrapper {
     data: String,
 }
 
-// ── JS engine patching constants ───────────────────────────────────────
-
-const MANAGERS_JS: &str = "js/rmmz_managers.js";
-const MANAGERS_JS_BAK: &str = "js/rmmz_managers.js.bak";
 const DATA_BAK: &str = "data.encrypted";
 
-/// Two targeted replacements on line 107 of rmmz_managers.js.
-/// Use `c.bid` (not `c.data`) because map JSON also has a `data` field (tile array).
-const PATCH_REPLACEMENTS: &[(&str, &str)] = &[
-    (
-        "var b = Buffer.from(c.data, 'base64');",
-        "if(c.bid){var b = Buffer.from(c.data, 'base64');",
-    ),
-    (
-        "window[name] = JSON.parse(b.toString('utf8').replace(/^\\uFEFF/, ''));   _t.onLoad(window[name]);",
-        "window[name] = JSON.parse(b.toString('utf8').replace(/^\\uFEFF/, ''));}else{window[name] = c;}   _t.onLoad(window[name]);",
-    ),
-];
+fn resolve_game_context(explicit_game: Option<&Path>, paths: &[&Path]) -> Result<GameContext> {
+    match explicit_game {
+        Some(game_root) => detect_game_context(game_root)
+            .with_context(|| format!("Failed to detect game context from {}", game_root.display())),
+        None => auto_detect_game_context(paths),
+    }
+}
 
-// ── Per-file operations ────────────────────────────────────────────────
+fn params_for_context(ctx: &GameContext) -> Result<CryptoParams> {
+    match ctx.engine {
+        EngineKind::Mz => mz::extract_mz_params_from_path(&ctx.manager_js),
+        EngineKind::MvCustom => mv::extract_mv_params_from_path(&ctx.manager_js),
+    }
+    .with_context(|| {
+        format!(
+            "Failed to extract crypto parameters from {}",
+            ctx.manager_js.display()
+        )
+    })
+}
 
-/// Decrypt a single encrypted .json file.
-pub fn decrypt_file(input: &Path, output: &Path, pretty: bool) -> Result<()> {
+fn decrypt_file_with_params(
+    input: &Path,
+    output: &Path,
+    pretty: bool,
+    params: &CryptoParams,
+) -> Result<()> {
     let text = fs::read_to_string(input)
         .with_context(|| format!("cannot read {}", input.display()))?;
 
-    let wrapper: EncryptedWrapper = serde_json::from_str(&text)
-        .with_context(|| format!("{} is not an encrypted RPG Maker MZ data file", input.display()))?;
+    let wrapper: EncryptedWrapper = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "{} is not an encrypted RPG Maker data file",
+            input.display()
+        )
+    })?;
 
     let ciphertext = base64::engine::general_purpose::STANDARD
         .decode(&wrapper.data)
@@ -54,10 +63,9 @@ pub fn decrypt_file(input: &Path, output: &Path, pretty: bool) -> Result<()> {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown.json");
-    let plaintext = crypto::decrypt(&ciphertext, filename);
+    let plaintext = crypto::decrypt(&ciphertext, filename, params);
     let mut text = String::from_utf8(plaintext).context("decrypted data is not valid UTF-8")?;
 
-    // Strip BOM if present
     if text.starts_with('\u{FEFF}') {
         text.remove(0);
     }
@@ -67,32 +75,28 @@ pub fn decrypt_file(input: &Path, output: &Path, pretty: bool) -> Result<()> {
     }
 
     if pretty {
-        let parsed: serde_json::Value = serde_json::from_str(&text)
-            .context("decrypted data is not valid JSON")?;
-        let formatted = serde_json::to_string_pretty(&parsed)?;
-        fs::write(output, formatted)?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).context("decrypted data is not valid JSON")?;
+        fs::write(output, serde_json::to_string_pretty(&parsed)?)?;
     } else {
         fs::write(output, text)?;
     }
     Ok(())
 }
 
-/// Encrypt a single plain .json file into RPG Maker MZ format.
-pub fn encrypt_file(input: &Path, output: &Path) -> Result<()> {
+fn encrypt_file_with_params(input: &Path, output: &Path, params: &CryptoParams) -> Result<()> {
     let mut text = fs::read_to_string(input)
         .with_context(|| format!("cannot read {}", input.display()))?;
 
-    // Remove BOM if present
     if text.starts_with('\u{FEFF}') {
         text.remove(0);
     }
 
-    let plaintext = text.as_bytes();
     let filename = output
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown.json");
-    let ciphertext = crypto::encrypt(plaintext, filename);
+    let ciphertext = crypto::encrypt(text.as_bytes(), filename, params);
     let data_b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
 
     let wrapper = EncryptedWrapper {
@@ -104,160 +108,154 @@ pub fn encrypt_file(input: &Path, output: &Path) -> Result<()> {
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string(&wrapper)?;
-    fs::write(output, json)?;
+    fs::write(output, serde_json::to_string(&wrapper)?)?;
     Ok(())
 }
 
-/// Process all .json files in a directory.
+pub fn decrypt_file(input: &Path, output: &Path, pretty: bool, game: Option<&Path>) -> Result<()> {
+    let ctx = resolve_game_context(game, &[input, output])?;
+    let params = params_for_context(&ctx)?;
+    decrypt_file_with_params(input, output, pretty, &params)
+}
+
+pub fn encrypt_file(input: &Path, output: &Path, game: Option<&Path>) -> Result<()> {
+    let ctx = resolve_game_context(game, &[input, output])?;
+    let params = params_for_context(&ctx)?;
+    encrypt_file_with_params(input, output, &params)
+}
+
+fn collect_json_entries<I>(entries: I) -> Result<Vec<PathBuf>>
+where
+    I: IntoIterator<Item = std::io::Result<fs::DirEntry>>,
+{
+    let mut paths = entries
+        .into_iter()
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.retain(|path| path.extension().map(|ext| ext == "json").unwrap_or(false));
+    paths.sort();
+    Ok(paths)
+}
+
 pub fn process_directory(
     input_dir: &Path,
     output_dir: &Path,
     decrypting: bool,
     pretty: bool,
+    game: Option<&Path>,
 ) -> Result<Vec<String>> {
     fs::create_dir_all(output_dir)?;
 
-    let mut entries: Vec<PathBuf> = fs::read_dir(input_dir)
-        .context("cannot read input directory")?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "json").unwrap_or(false))
-        .collect();
-    entries.sort();
+    let entries = fs::read_dir(input_dir).context("cannot read input directory")?;
+    let entries = collect_json_entries(entries).context("cannot iterate input directory")?;
+    let ctx = resolve_game_context(game, &[input_dir, output_dir])?;
+    let params = params_for_context(&ctx)?;
 
     let mut processed = Vec::new();
     for src in &entries {
         let fname = src.file_name().unwrap().to_str().unwrap().to_string();
         let dst = output_dir.join(&fname);
-        let result = if decrypting {
-            decrypt_file(src, &dst, pretty)
+        if decrypting {
+            decrypt_file_with_params(src, &dst, pretty, &params)
         } else {
-            encrypt_file(src, &dst)
-        };
-        match result {
-            Ok(()) => processed.push(fname),
-            Err(e) => eprintln!("  ERROR processing {}: {}", src.display(), e),
+            encrypt_file_with_params(src, &dst, &params)
         }
+        .with_context(|| format!("failed to process {}", src.display()))?;
+        processed.push(fname);
     }
     Ok(processed)
 }
 
-// ── JS patching ────────────────────────────────────────────────────────
-
-/// Patch `rmmz_managers.js` to support plain JSON in addition to encrypted.
-/// Returns true if newly patched, false if already patched.
-pub fn patch_managers_js(game_dir: &Path) -> Result<bool> {
-    let js_path = game_dir.join(MANAGERS_JS);
-    if !js_path.is_file() {
-        anyhow::bail!(
-            "{} not found — is this an RPG Maker MZ game?",
-            js_path.display()
-        );
+fn js_backup_path(ctx: &GameContext) -> PathBuf {
+    match ctx.engine {
+        EngineKind::Mz => ctx.root.join(mz::MANAGERS_JS_BAK),
+        EngineKind::MvCustom => ctx.root.join(mv::MANAGERS_JS_BAK),
     }
-
-    let content = fs::read_to_string(&js_path)?;
-
-    // Check already patched
-    if content.contains("if(c.bid){var b = Buffer.from(c.data, 'base64');") {
-        println!("  JS already patched (plain JSON support detected).");
-        return Ok(false);
-    }
-
-    // Verify all patterns exist
-    for (old, _) in PATCH_REPLACEMENTS {
-        if !content.contains(old) {
-            anyhow::bail!(
-                "Expected pattern not found in {}\n\
-                 This game may use a different engine version.",
-                js_path.display()
-            );
-        }
-    }
-
-    // Apply replacements
-    let mut new_content = content;
-    for (old, new) in PATCH_REPLACEMENTS {
-        new_content = new_content.replace(old, new);
-    }
-
-    fs::write(&js_path, new_content)?;
-    Ok(true)
 }
 
-// ── High-level commands ────────────────────────────────────────────────
+fn patch_managers_js(ctx: &GameContext) -> Result<bool> {
+    match ctx.engine {
+        EngineKind::Mz => mz::patch_managers_js(&ctx.root),
+        EngineKind::MvCustom => mv::patch_managers_js(&ctx.root),
+    }
+}
 
 pub fn cmd_restore(game_dir: &Path) -> Result<()> {
-    let data_dir = game_dir.join("data");
-    let data_bak = game_dir.join(DATA_BAK);
-    let js_file = game_dir.join(MANAGERS_JS);
-    let js_bak = game_dir.join(MANAGERS_JS_BAK);
+    let ctx = detect_game_context(game_dir)?;
+    let data_dir = ctx.root.join("data");
+    let data_bak = ctx.root.join(DATA_BAK);
+    let js_file = ctx.manager_js.clone();
+    let js_bak = js_backup_path(&ctx);
 
-    if !data_dir.is_dir() {
-        anyhow::bail!(
-            "{} not found — is this an RPG Maker MZ game?",
-            data_dir.display()
-        );
-    }
-    if !js_file.is_file() {
-        anyhow::bail!(
-            "{} not found — is this an RPG Maker MZ game?",
-            js_file.display()
-        );
-    }
     if data_bak.exists() {
-        anyhow::bail!(
-            "Backup already exists at {}/\n\
-             Run 'revert' first if you want to undo a previous restore.",
+        bail!(
+            "Backup already exists at {}\nRun 'revert' first if you want to undo a previous restore.",
             data_bak.display()
         );
     }
 
+    let label = match ctx.engine {
+        EngineKind::Mz => "RPG Maker MZ",
+        EngineKind::MvCustom => "RPG Maker MV-custom",
+    };
+
     println!("{}", "=".repeat(60));
-    println!("RPG Maker MZ — One-Click Restore");
+    println!("{} — One-Click Restore", label);
     println!("{}", "=".repeat(60));
-    println!("Game directory: {}", game_dir.canonicalize()?.display());
+    println!("Game directory: {}", ctx.root.canonicalize()?.display());
     println!();
 
-    // Step 1: backup data/
     println!("[1/3] Backing up encrypted data/ ...");
     let file_count = fs::read_dir(&data_dir)?.count();
     fs::rename(&data_dir, &data_bak)?;
-    println!("  → {}/ ({} files)", data_bak.file_name().unwrap().to_str().unwrap(), file_count);
+    println!(
+        "  → {}/ ({} files)",
+        data_bak.file_name().unwrap().to_str().unwrap(),
+        file_count
+    );
 
-    // Step 2: decrypt in place
     println!("[2/3] Decrypting data files ...");
     fs::create_dir(&data_dir)?;
-    let processed = process_directory(&data_bak, &data_dir, true, false)?;
+    let params = params_for_context(&ctx)?;
+    let entries = fs::read_dir(&data_bak)?;
+    let entries = collect_json_entries(entries).context("cannot iterate backup data directory")?;
+    let mut processed = Vec::new();
+    for src in &entries {
+        let fname = src.file_name().unwrap().to_str().unwrap().to_string();
+        let dst = data_dir.join(&fname);
+        decrypt_file_with_params(src, &dst, false, &params)
+            .with_context(|| format!("failed to process {}", src.display()))?;
+        processed.push(fname);
+    }
     println!("  → {} files decrypted", processed.len());
 
-    // Step 3: backup + patch JS
     println!("[3/3] Patching JS engine ...");
     fs::copy(&js_file, &js_bak)?;
     println!("  → backup: {}", js_bak.file_name().unwrap().to_str().unwrap());
 
-    let patched = patch_managers_js(game_dir)?;
+    let patched = patch_managers_js(&ctx)?;
     if patched {
-        println!("  → rmmz_managers.js patched: plain JSON support enabled");
+        println!("  → {} patched: plain JSON support enabled", js_file.file_name().unwrap().to_str().unwrap());
     }
 
     println!();
     println!("Done! The game now runs with decrypted (editable) data files.");
     println!("  Encrypted backup: {}/", DATA_BAK);
-    println!("  JS backup:        {}", MANAGERS_JS_BAK);
+    println!("  JS backup:        {}", js_bak.strip_prefix(&ctx.root).unwrap().display());
     println!();
-    println!("To undo, run:  rpgmz_crypt revert {}", game_dir.display());
+    println!("To undo, run:  rpgmz_crypt revert {}", ctx.root.display());
     Ok(())
 }
 
 pub fn cmd_revert(game_dir: &Path) -> Result<()> {
-    let data_dir = game_dir.join("data");
-    let data_bak = game_dir.join(DATA_BAK);
-    let js_file = game_dir.join(MANAGERS_JS);
-    let js_bak = game_dir.join(MANAGERS_JS_BAK);
+    let ctx = detect_game_context(game_dir)?;
+    let data_dir = ctx.root.join("data");
+    let data_bak = ctx.root.join(DATA_BAK);
+    let js_file = ctx.manager_js.clone();
+    let js_bak = js_backup_path(&ctx);
 
     if !data_bak.is_dir() && !js_bak.is_file() {
-        anyhow::bail!("No backups found. Nothing to revert.");
+        bail!("No backups found. Nothing to revert.");
     }
 
     println!("Reverting restore...");
@@ -274,7 +272,10 @@ pub fn cmd_revert(game_dir: &Path) -> Result<()> {
     if js_bak.is_file() {
         fs::copy(&js_bak, &js_file)?;
         fs::remove_file(&js_bak)?;
-        println!("  → {} restored", MANAGERS_JS);
+        println!(
+            "  → {} restored",
+            js_file.strip_prefix(&ctx.root).unwrap().display()
+        );
     }
 
     println!("Revert complete. Game is back to its original (encrypted) state.");
@@ -282,28 +283,41 @@ pub fn cmd_revert(game_dir: &Path) -> Result<()> {
 }
 
 pub fn cmd_patch_js(game_dir: &Path) -> Result<()> {
-    let js_file = game_dir.join(MANAGERS_JS);
-    let js_bak = game_dir.join(MANAGERS_JS_BAK);
-
-    if !js_file.is_file() {
-        anyhow::bail!("{} not found.", js_file.display());
-    }
-    if js_bak.exists() {
-        println!("Note: backup already exists at {} (not overwriting)", js_bak.display());
-    }
+    let ctx = detect_game_context(game_dir)?;
+    let js_file = ctx.manager_js.clone();
+    let js_bak = js_backup_path(&ctx);
 
     println!("Patching JS engine...");
-    fs::copy(&js_file, &js_bak)?;
-    println!(
-        "  → backup: {}",
-        js_bak.file_name().unwrap().to_str().unwrap()
-    );
+    if js_bak.exists() {
+        println!(
+            "Note: backup already exists at {} (not overwriting)",
+            js_bak.display()
+        );
+    } else {
+        fs::copy(&js_file, &js_bak)?;
+        println!("  → backup: {}", js_bak.file_name().unwrap().to_str().unwrap());
+    }
 
-    let patched = patch_managers_js(game_dir)?;
+    let patched = patch_managers_js(&ctx)?;
     if patched {
-        println!("  → rmmz_managers.js patched successfully");
+        println!("  → {} patched successfully", js_file.file_name().unwrap().to_str().unwrap());
     }
     println!();
     println!("The engine now accepts both encrypted and plain JSON data files.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn process_directory_fails_when_read_dir_entry_errors() {
+        let entry_error = io::Error::new(io::ErrorKind::Other, "broken entry");
+        let result = collect_json_entries(vec![Err(entry_error)].into_iter());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("broken entry"));
+    }
 }
