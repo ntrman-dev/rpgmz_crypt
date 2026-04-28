@@ -4,6 +4,9 @@
 
 This tool targets the RPG Maker game family where `data/*.json` files are wrapped as `{"uid","bid","data"}` and decrypted inside the manager script at load time.
 
+
+ai2.moe bbs topic： [RPG Maker MZ / MV data JSON 数据加解密工具](https://www.ai2.moe/topic/46675-rpg-maker-mzmv-%E5%8A%A0%E5%AF%86data%E6%95%B0%E6%8D%AE%E7%9A%84%E8%A7%A3%E5%AF%86%E5%B7%A5%E5%85%B7%E5%AE%9E%E7%8E%B0/)
+
 ## Supported game families
 
 Supported and tested families:
