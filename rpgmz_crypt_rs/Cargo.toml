@@ -1,0 +1,18 @@
+[package]
+name = "rpgmz_crypt"
+version = "1.0.0"
+edition = "2021"
+description = "RPG Maker MZ data file encrypt/decrypt tool"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+strip = true
