@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 /// RPG Maker data file encrypt/decrypt tool
 #[derive(Parser)]
-#[command(name = "rpgmz_crypt")]
+#[command(name = "rpgdata_crypt")]
 #[command(version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]

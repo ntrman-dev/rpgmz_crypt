@@ -4,9 +4,6 @@
 
 This tool targets the RPG Maker game family where `data/*.json` files are wrapped as `{"uid","bid","data"}` and decrypted inside the manager script at load time.
 
-
-ai2.moe bbs topic： [RPG Maker MZ / MV data JSON 数据加解密工具](https://www.ai2.moe/topic/46675-rpg-maker-mzmv-%E5%8A%A0%E5%AF%86data%E6%95%B0%E6%8D%AE%E7%9A%84%E8%A7%A3%E5%AF%86%E5%B7%A5%E5%85%B7%E5%AE%9E%E7%8E%B0/)
-
 ## Supported game families
 
 Supported and tested families:
@@ -49,6 +46,73 @@ Conversion commands try to auto-detect the game root first.
 
 Current behavior is: auto-detect first, and only require `--game` when detection fails or when you want to override detection.
 
+## Tool names and compatibility
+
+- Primary Python entry point: `rpgdata_crypt.py`
+- Backward-compatible Python alias: `rpgmz_crypt.py`
+- Rust binary name: `rpgdata_crypt`
+- Rust source directory: `rpgmz_crypt_rs/`
+
+The repository directory still keeps the historical `rpgmz_crypt_rs/` folder name, but the user-facing tool name is now `rpgdata_crypt`.
+
+## How the supported JSON encryption family works
+
+### 1. Wrapped JSON file format
+
+Supported games store each encrypted data file as a JSON wrapper that looks like this:
+
+```json
+{
+  "uid": "...",
+  "bid": "...",
+  "data": "base64 ciphertext"
+}
+```
+
+- `uid` is an identifier carried by the game but not used for key derivation
+- `bid` is useful as an encrypted/plain marker once the manager script is patched
+- `data` is the actual base64-encoded ciphertext payload
+
+### 2. Parameters come from the game engine, not from the file itself
+
+The tool reads the decryption parameters from the manager script in the game root:
+
+- MZ: `js/rmmz_managers.js`
+- MV-custom: `js/rpg_managers.js`
+
+This is why auto-detection and `--game` matter. The encrypted JSON file alone does not tell the tool which `_K`, XOR constants, shift counts, or filename normalization rule the game expects.
+
+### 3. Filename binding is part of the key derivation
+
+The filename stem (for example `Map002` from `Map002.json`) participates in the key schedule. In some games the stem is lowercased before hashing; in others it is not. Renaming files before encrypting them back changes the derived key and produces unusable output.
+
+### 4. Decryption runs backwards with plaintext feedback
+
+The supported family uses a reverse XOR stream:
+
+- iterate from the end of the file to the beginning
+- derive a position-aware byte key from `_K`, filename hash, shift/XOR constants, and the previous plaintext byte
+- XOR the ciphertext byte with that key
+
+This is why the tool must replicate the game’s exact JS-style integer behavior instead of using a simplified ad-hoc transform.
+
+### 5. What `restore` actually changes
+
+`restore` does two things in addition to decrypting `data/*.json`:
+
+1. backs up the original encrypted `data/` into `data.encrypted/`
+2. patches the manager script so the loader behaves like:
+
+```javascript
+if (c.bid) {
+    // wrapped encrypted JSON -> decrypt
+} else {
+    // plain JSON -> use directly
+}
+```
+
+That patch is what allows you to edit plain JSON in-place after `restore` without re-encrypting after every change.
+
 ## Quick start
 
 ### MZ restore/revert flow
@@ -56,9 +120,9 @@ Current behavior is: auto-detect first, and only require `--game` when detection
 Use this when you want the game to run directly on plain JSON data:
 
 ```bash
-python3 rpgmz_crypt.py restore /path/to/game
+python3 rpgdata_crypt.py restore /path/to/game
 # edit data/*.json directly
-python3 rpgmz_crypt.py revert /path/to/game
+python3 rpgdata_crypt.py revert /path/to/game
 ```
 
 `restore` for MZ will:
@@ -74,9 +138,9 @@ python3 rpgmz_crypt.py revert /path/to/game
 MV-custom games that use `js/rpg_managers.js` are supported by the same convenience flow:
 
 ```bash
-python3 rpgmz_crypt.py restore /path/to/game
+python3 rpgdata_crypt.py restore /path/to/game
 # edit data/*.json directly
-python3 rpgmz_crypt.py revert /path/to/game
+python3 rpgdata_crypt.py revert /path/to/game
 ```
 
 For MV-custom games, `restore` will:
@@ -93,21 +157,21 @@ The conversion workflow below is still available when you want a directory-level
 
 ```bash
 # decrypt a directory
-python3 rpgmz_crypt.py decrypt /path/to/game/data ./data_plain --pretty
+python3 rpgdata_crypt.py decrypt /path/to/game/data ./data_plain --pretty
 
 # encrypt it back
-python3 rpgmz_crypt.py encrypt ./data_plain /path/to/game/data
+python3 rpgdata_crypt.py encrypt ./data_plain /path/to/game/data
 
 # explicit root when paths are outside the game tree
-python3 rpgmz_crypt.py decrypt /encrypted/data ./data_plain --pretty --game /path/to/game
-python3 rpgmz_crypt.py encrypt ./data_plain /encrypted/data --game /path/to/game
+python3 rpgdata_crypt.py decrypt /encrypted/data ./data_plain --pretty --game /path/to/game
+python3 rpgdata_crypt.py encrypt ./data_plain /encrypted/data --game /path/to/game
 ```
 
 Single-file commands follow the same rule:
 
 ```bash
-python3 rpgmz_crypt.py decrypt-file /path/to/game/data/Map002.json ./Map002.json --pretty
-python3 rpgmz_crypt.py encrypt-file ./Map002.json /path/to/game/data/Map002.json
+python3 rpgdata_crypt.py decrypt-file /path/to/game/data/Map002.json ./Map002.json --pretty
+python3 rpgdata_crypt.py encrypt-file ./Map002.json /path/to/game/data/Map002.json
 ```
 
 ## Filename binding requirement
@@ -132,28 +196,28 @@ That usually means the game tried to load a file that was encrypted with mismatc
 ## Command summary
 
 ```bash
-python3 rpgmz_crypt.py decrypt <encrypted_dir> <output_dir> [--pretty] [--game /path/to/game]
-python3 rpgmz_crypt.py encrypt <plain_dir> <output_dir> [--game /path/to/game]
-python3 rpgmz_crypt.py decrypt-file <input.json> <output.json> [--pretty] [--game /path/to/game]
-python3 rpgmz_crypt.py encrypt-file <input.json> <output.json> [--game /path/to/game]
-python3 rpgmz_crypt.py restore /path/to/game
-python3 rpgmz_crypt.py revert /path/to/game
-python3 rpgmz_crypt.py patch-js /path/to/game
+python3 rpgdata_crypt.py decrypt <encrypted_dir> <output_dir> [--pretty] [--game /path/to/game]
+python3 rpgdata_crypt.py encrypt <plain_dir> <output_dir> [--game /path/to/game]
+python3 rpgdata_crypt.py decrypt-file <input.json> <output.json> [--pretty] [--game /path/to/game]
+python3 rpgdata_crypt.py encrypt-file <input.json> <output.json> [--game /path/to/game]
+python3 rpgdata_crypt.py restore /path/to/game
+python3 rpgdata_crypt.py revert /path/to/game
+python3 rpgdata_crypt.py patch-js /path/to/game
 ```
 
 ## Rust build artifacts
 
-The Rust CLI crate is in `rpgmz_crypt_rs/` and builds the `rpgmz_crypt` binary.
+The Rust CLI crate is in `rpgmz_crypt_rs/` and builds the `rpgdata_crypt` binary.
 
 Rolling release artifact names:
 
-- Linux: `rpgmz_crypt-linux-x86_64`
-- Windows: `rpgmz_crypt-windows-x86_64.exe`
+- Linux: `rpgdata_crypt-linux-x86_64`
+- Windows: `rpgdata_crypt-windows-x86_64.exe`
 
 Local default Cargo outputs remain:
 
-- Linux local release binary: `target/release/rpgmz_crypt`
-- Windows local release binary: `target/release/rpgmz_crypt.exe`
+- Linux local release binary: `target/release/rpgdata_crypt`
+- Windows local release binary: `target/release/rpgdata_crypt.exe`
 
 ## Notes
 

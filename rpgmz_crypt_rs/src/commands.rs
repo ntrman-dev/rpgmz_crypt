@@ -243,7 +243,7 @@ pub fn cmd_restore(game_dir: &Path) -> Result<()> {
     println!("  Encrypted backup: {}/", DATA_BAK);
     println!("  JS backup:        {}", js_bak.strip_prefix(&ctx.root).unwrap().display());
     println!();
-    println!("To undo, run:  rpgmz_crypt revert {}", ctx.root.display());
+    println!("To undo, run:  rpgdata_crypt revert {}", ctx.root.display());
     Ok(())
 }
 

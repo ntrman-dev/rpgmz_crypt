@@ -4,6 +4,7 @@
 
 本工具适用于这样一类 RPG Maker 游戏：`data/*.json` 不是明文，而是被包装成 `{"uid","bid","data"}`，并在管理器脚本加载时解密。
 
+
 御爱论坛帖子： [RPG Maker MZ / MV data JSON 数据加解密工具](https://www.ai2.moe/topic/46675-rpg-maker-mzmv-%E5%8A%A0%E5%AF%86data%E6%95%B0%E6%8D%AE%E7%9A%84%E8%A7%A3%E5%AF%86%E5%B7%A5%E5%85%B7%E5%AE%9E%E7%8E%B0/)
 
 有问题论坛私信，这个github账号不咋用
@@ -50,6 +51,75 @@
 
 当前行为是：先自动检测，只有检测失败时，或者你想手动覆盖检测结果时，才需要 `--game`。
 
+## 工具名称与兼容入口
+
+- Python 主入口：`rpgdata_crypt.py`
+- 向后兼容的 Python 别名：`rpgmz_crypt.py`
+- Rust 二进制名：`rpgdata_crypt`
+- Rust 源码目录：`rpgmz_crypt_rs/`
+
+也就是说，仓库里还保留历史目录名 `rpgmz_crypt_rs/`，但对用户暴露的工具名现在统一是 `rpgdata_crypt`。
+
+## 这类 JSON 加密的工作原理
+
+### 1. 文件不是明文 JSON，而是包装 JSON
+
+支持的游戏通常把每个加密数据文件存成这样的包装结构：
+
+```json
+{
+  "uid": "...",
+  "bid": "...",
+  "data": "base64 ciphertext"
+}
+```
+
+- `uid` 是游戏携带的标识符，本身不参与密钥推导
+- `bid` 在补丁后的 loader 中可作为加密/明文区分标记
+- `data` 才是真正的 base64 密文载荷
+
+### 2. 参数来自引擎脚本，而不是来自数据文件本身
+
+工具会从游戏根目录里的管理器脚本提取参数：
+
+- MZ：`js/rmmz_managers.js`
+- MV 自定义：`js/rpg_managers.js`
+
+这就是为什么自动检测和 `--game` 很重要：单看加密 JSON 文件本身，并不知道该使用哪组 `_K`、XOR 常量、位移参数，或者文件名是否需要先转小写。
+
+### 3. 文件名本身参与密钥推导
+
+例如 `Map002.json` 的 `Map002` 会参与哈希；有些游戏会先转小写，有些不会。也就是说，文件名不只是展示用，而是密钥推导的一部分。
+
+这就是为什么你不能把文件改名成 `Map002_edit.json` 之后再加密回去。
+
+### 4. 解密是“从后往前 + 明文反馈”的 XOR 流
+
+支持的这类算法核心是：
+
+- 从文件末尾往开头处理
+- 每个位置的 key byte 都和 `_K`、文件名哈希、位移/XOR 常量、当前位置索引、前一个明文字节有关
+- 再用这个 key byte 去 XOR 当前密文字节
+
+所以工具必须精确复现引擎里的 JS 整数行为，不能只写一个“差不多”的异或脚本。
+
+### 5. `restore` 实际改了什么
+
+`restore` 不只是把 `data/*.json` 解密出来，它还会：
+
+1. 把原始加密 `data/` 备份到 `data.encrypted/`
+2. 修改管理器脚本，让 loader 变成类似：
+
+```javascript
+if (c.bid) {
+    // 加密包装 JSON -> 先解密
+} else {
+    // 明文 JSON -> 直接使用
+}
+```
+
+正是这个 JS 补丁，让你在 `restore` 之后可以直接编辑明文 JSON，而不必每改一次就重新加密。
+
 ## 快速开始
 
 ### MZ 的 restore/revert 流程
@@ -57,9 +127,9 @@
 如果你希望游戏直接运行明文 JSON，推荐使用：
 
 ```bash
-python3 rpgmz_crypt.py restore /path/to/game
+python3 rpgdata_crypt.py restore /path/to/game
 # 直接编辑 data/*.json
-python3 rpgmz_crypt.py revert /path/to/game
+python3 rpgdata_crypt.py revert /path/to/game
 ```
 
 MZ 的 `restore` 会做三件事：
@@ -75,9 +145,9 @@ MZ 的 `restore` 会做三件事：
 使用 `js/rpg_managers.js` 的 MV 自定义游戏同样支持这套便捷流程：
 
 ```bash
-python3 rpgmz_crypt.py restore /path/to/game
+python3 rpgdata_crypt.py restore /path/to/game
 # 直接编辑 data/*.json
-python3 rpgmz_crypt.py revert /path/to/game
+python3 rpgdata_crypt.py revert /path/to/game
 ```
 
 对于 MV 自定义游戏，`restore` 会做三件事：
@@ -94,21 +164,21 @@ python3 rpgmz_crypt.py revert /path/to/game
 
 ```bash
 # 批量解密
-python3 rpgmz_crypt.py decrypt /path/to/game/data ./data_plain --pretty
+python3 rpgdata_crypt.py decrypt /path/to/game/data ./data_plain --pretty
 
 # 重新加密
-python3 rpgmz_crypt.py encrypt ./data_plain /path/to/game/data
+python3 rpgdata_crypt.py encrypt ./data_plain /path/to/game/data
 
 # 当路径不在游戏目录树内时，显式指定游戏根目录
-python3 rpgmz_crypt.py decrypt /encrypted/data ./data_plain --pretty --game /path/to/game
-python3 rpgmz_crypt.py encrypt ./data_plain /encrypted/data --game /path/to/game
+python3 rpgdata_crypt.py decrypt /encrypted/data ./data_plain --pretty --game /path/to/game
+python3 rpgdata_crypt.py encrypt ./data_plain /encrypted/data --game /path/to/game
 ```
 
 单文件命令同样遵循这个规则：
 
 ```bash
-python3 rpgmz_crypt.py decrypt-file /path/to/game/data/Map002.json ./Map002.json --pretty
-python3 rpgmz_crypt.py encrypt-file ./Map002.json /path/to/game/data/Map002.json
+python3 rpgdata_crypt.py decrypt-file /path/to/game/data/Map002.json ./Map002.json --pretty
+python3 rpgdata_crypt.py encrypt-file ./Map002.json /path/to/game/data/Map002.json
 ```
 
 ## 文件名绑定要求
@@ -133,28 +203,28 @@ python3 rpgmz_crypt.py encrypt-file ./Map002.json /path/to/game/data/Map002.json
 ## 命令摘要
 
 ```bash
-python3 rpgmz_crypt.py decrypt <encrypted_dir> <output_dir> [--pretty] [--game /path/to/game]
-python3 rpgmz_crypt.py encrypt <plain_dir> <output_dir> [--game /path/to/game]
-python3 rpgmz_crypt.py decrypt-file <input.json> <output.json> [--pretty] [--game /path/to/game]
-python3 rpgmz_crypt.py encrypt-file <input.json> <output.json> [--game /path/to/game]
-python3 rpgmz_crypt.py restore /path/to/game
-python3 rpgmz_crypt.py revert /path/to/game
-python3 rpgmz_crypt.py patch-js /path/to/game
+python3 rpgdata_crypt.py decrypt <encrypted_dir> <output_dir> [--pretty] [--game /path/to/game]
+python3 rpgdata_crypt.py encrypt <plain_dir> <output_dir> [--game /path/to/game]
+python3 rpgdata_crypt.py decrypt-file <input.json> <output.json> [--pretty] [--game /path/to/game]
+python3 rpgdata_crypt.py encrypt-file <input.json> <output.json> [--game /path/to/game]
+python3 rpgdata_crypt.py restore /path/to/game
+python3 rpgdata_crypt.py revert /path/to/game
+python3 rpgdata_crypt.py patch-js /path/to/game
 ```
 
 ## Rust 构建产物名称
 
-Rust CLI crate 位于 `rpgmz_crypt_rs/`，默认构建出的二进制名为 `rpgmz_crypt`。
+Rust CLI crate 位于 `rpgmz_crypt_rs/`，默认构建出的二进制名为 `rpgdata_crypt`。
 
 滚动发布使用的产物名称：
 
-- Linux：`rpgmz_crypt-linux-x86_64`
-- Windows：`rpgmz_crypt-windows-x86_64.exe`
+- Linux：`rpgdata_crypt-linux-x86_64`
+- Windows：`rpgdata_crypt-windows-x86_64.exe`
 
 本地 `cargo build --release` 的默认输出仍然是：
 
-- Linux 本地 release 二进制：`target/release/rpgmz_crypt`
-- Windows 本地 release 二进制：`target/release/rpgmz_crypt.exe`
+- Linux 本地 release 二进制：`target/release/rpgdata_crypt`
+- Windows 本地 release 二进制：`target/release/rpgdata_crypt.exe`
 
 ## 说明
 

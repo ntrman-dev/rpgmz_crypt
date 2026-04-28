@@ -1,5 +1,5 @@
-use rpgmz_crypt::commands::{cmd_restore, cmd_revert, decrypt_file};
-use rpgmz_crypt::detect::EngineKind;
+use rpgdata_crypt::commands::{cmd_restore, cmd_revert, decrypt_file};
+use rpgdata_crypt::detect::EngineKind;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,10 @@ fn auto_detects_mv_game_on_decrypt_file() {
         .parent()
         .unwrap()
         .join("game");
-    let input = root.join("data/Actors.json");
+    let input = match serde_json::from_str::<Value>(&fs::read_to_string(root.join("data/Actors.json")).unwrap()) {
+        Ok(Value::Object(map)) if map.contains_key("data") => root.join("data/Actors.json"),
+        _ => root.join("data.encrypted/Actors.json"),
+    };
     let temp = tempdir().unwrap();
     let output = temp.path().join("Actors.json");
 
@@ -131,10 +134,10 @@ fn manager_fixture(engine: EngineKind) -> (&'static str, &'static str) {
 
 fn decrypt_or_encrypt_fixture(engine: EngineKind, input: &Path, output: &Path) {
     match engine {
-        EngineKind::Mz => rpgmz_crypt::commands::encrypt_file(input, output, None).unwrap(),
+        EngineKind::Mz => rpgdata_crypt::commands::encrypt_file(input, output, None).unwrap(),
         EngineKind::MvCustom => {
             let game_root = output.parent().unwrap().parent().unwrap();
-            rpgmz_crypt::commands::encrypt_file(input, output, Some(game_root)).unwrap()
+            rpgdata_crypt::commands::encrypt_file(input, output, Some(game_root)).unwrap()
         }
     }
 }
